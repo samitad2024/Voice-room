@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "562568396436",
+    "project_id": "social-voice-95f51",
+    "storage_bucket": "social-voice-95f51.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:562568396436:android:b491b066ef1e6add833e81",
+        "android_client_info": {
+          "package_name": "com.example.social_voice"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDm74yDPZePPbrOv0j5g0AzQA6JdGuGVkQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
