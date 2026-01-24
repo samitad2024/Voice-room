@@ -38,7 +38,9 @@ class SpeakerGridWidget extends StatelessWidget {
         itemBuilder: (context, index) {
           final speaker = visibleSpeakers[index];
           final isCurrentUser = speaker.userId == currentUserId;
-          final isSpeaking = false; // TODO: Get from Zego audio level callback
+          // Speaking indicator - check if user is speaking based on isMuted status
+          // When not muted and is a speaker, show speaking indicator (simplified for now)
+          final isSpeaking = !speaker.isMuted && speaker.canSpeak;
 
           return InkWell(
             onTap: () => onSpeakerTap(speaker),
@@ -50,7 +52,7 @@ class SpeakerGridWidget extends StatelessWidget {
                 Stack(
                   alignment: Alignment.center,
                   children: [
-                    // Speaking animation ring
+                    // Speaking animation ring - shows when user is not muted
                     if (isSpeaking)
                       Container(
                         width: 76,

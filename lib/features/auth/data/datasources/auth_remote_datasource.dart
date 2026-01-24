@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:supabase_flutter/supabase_flutter.dart' hide AuthException;
 import '../../../../core/constants/app_constants.dart';
@@ -37,26 +38,42 @@ class AuthRemoteDataSourceImpl implements AuthRemoteDataSource {
   @override
   Future<UserModel> getCurrentUser() async {
     try {
+      debugPrint('\n   ──────────────────────────────────────────────────');
+      debugPrint('   🗄️  [AUTH DATASOURCE] getCurrentUser');
+      debugPrint('   ──────────────────────────────────────────────────');
       // Attempt to recover session from storage
       final currentUser = supabase.auth.currentUser;
+      debugPrint('   🔍 Checking Supabase auth.currentUser...');
 
       if (currentUser == null) {
+        debugPrint('   ❌ No authenticated user in session');
         throw AuthException('No user logged in');
       }
 
+      debugPrint('   ✅ Found authenticated user!');
+      debugPrint('   👤 Auth User ID: ${currentUser.id}');
+      debugPrint('   📧 Email: ${currentUser.email ?? "N/A"}');
+      debugPrint('   📱 Phone: ${currentUser.phone ?? "N/A"}');
+
       // Fetch user data from users table
+      debugPrint('\n   📥 Fetching user profile from users table...');
       final response = await supabase
           .from('users')
           .select()
           .eq('id', currentUser.id)
           .single();
 
+      debugPrint('   ✅ User profile fetched from database!');
+      debugPrint('   ──────────────────────────────────────────────────\n');
+
       return UserModel.fromJson(response);
     } on AuthException {
       rethrow;
     } on PostgrestException catch (e) {
+      debugPrint('   ❌ PostgrestException: ${e.message}');
       throw ServerException('Database error: ${e.message}');
     } catch (e) {
+      debugPrint('   ❌ Exception: $e');
       throw ServerException(e.toString());
     }
   }
@@ -150,7 +167,11 @@ class AuthRemoteDataSourceImpl implements AuthRemoteDataSource {
   @override
   Future<UserModel> loginWithGoogle() async {
     try {
+      debugPrint('\n   ──────────────────────────────────────────────────');
+      debugPrint('   🗄️  [AUTH DATASOURCE] loginWithGoogle');
+      debugPrint('   ──────────────────────────────────────────────────');
       // Native Google Sign-In
+      debugPrint('   🔵 Starting native Google Sign-In...');
       final GoogleSignIn googleSignIn = GoogleSignIn(
         serverClientId: AppConstants.googleClientId, // Add to constants
       );
@@ -158,11 +179,18 @@ class AuthRemoteDataSourceImpl implements AuthRemoteDataSource {
       final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
 
       if (googleUser == null) {
+        debugPrint('   ❌ Google sign-in cancelled by user');
         throw AuthException('Google sign-in cancelled');
       }
 
+      debugPrint('   ✅ Google account selected: ${googleUser.email}');
+      debugPrint('   ⏳ Getting Google auth tokens...');
+
       final GoogleSignInAuthentication googleAuth =
           await googleUser.authentication;
+
+      debugPrint('   ✅ Got Google ID token');
+      debugPrint('   ⏳ Signing into Supabase with Google credentials...');
 
       // Sign in to Supabase with Google credentials
       final authResponse = await supabase.auth.signInWithIdToken(
@@ -172,23 +200,33 @@ class AuthRemoteDataSourceImpl implements AuthRemoteDataSource {
       );
 
       if (authResponse.user == null) {
+        debugPrint('   ❌ Supabase signInWithIdToken returned null user');
         throw AuthException('Google authentication failed');
       }
 
+      debugPrint('   ✅ Supabase authentication successful!');
       final userId = authResponse.user!.id;
       final email = authResponse.user!.email;
       final name = authResponse.user!.userMetadata?['full_name'] as String?;
       final photoUrl =
           authResponse.user!.userMetadata?['avatar_url'] as String?;
 
+      debugPrint('   👤 User ID: $userId');
+      debugPrint('   📧 Email: $email');
+      debugPrint('   👤 Name: $name');
+
       // Check if user profile exists
+      debugPrint('\n   🔍 Checking if user exists in users table...');
       final existingUser =
           await supabase.from('users').select().eq('id', userId).maybeSingle();
 
       if (existingUser != null) {
+        debugPrint('   ✅ Existing user found in database!');
+        debugPrint('   ──────────────────────────────────────────────────\n');
         return UserModel.fromJson(existingUser);
       } else {
         // New user
+        debugPrint('   🆕 New user - creating profile in users table...');
         final newUser = UserModel(
           uid: userId,
           name: name,

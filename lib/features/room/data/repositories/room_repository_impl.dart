@@ -168,14 +168,115 @@ class RoomRepositoryImpl implements RoomRepository {
   Future<Either<Failure, List<LiveRoomParticipant>>> getLiveParticipants(
     String roomId,
   ) async {
-    // TODO: Implement this
-    return const Left(ServerFailure('Not implemented yet'));
+    if (!await networkInfo.isConnected) {
+      return const Left(NetworkFailure());
+    }
+
+    try {
+      final participants = await remoteDataSource.getLiveParticipants(roomId);
+      return Right(participants);
+    } on ServerException catch (e) {
+      return Left(ServerFailure(e.message));
+    } catch (e) {
+      return Left(ServerFailure(e.toString()));
+    }
   }
 
   @override
   Future<Either<Failure, void>> requestToSpeak(String roomId) async {
-    // TODO: Implement this
-    return const Left(ServerFailure('Not implemented yet'));
+    if (!await networkInfo.isConnected) {
+      return const Left(NetworkFailure());
+    }
+
+    try {
+      final currentUser = remoteDataSource.supabase.auth.currentUser;
+      if (currentUser == null) {
+        return const Left(AuthFailure('User not logged in'));
+      }
+
+      await remoteDataSource.requestToSpeak(
+        roomId: roomId,
+        userId: currentUser.id,
+      );
+      return const Right(null);
+    } on ServerException catch (e) {
+      return Left(ServerFailure(e.message));
+    } catch (e) {
+      return Left(ServerFailure(e.toString()));
+    }
+  }
+
+  @override
+  Future<Either<Failure, List<dynamic>>> getSpeakerRequests(
+      String roomId) async {
+    if (!await networkInfo.isConnected) {
+      return const Left(NetworkFailure());
+    }
+
+    try {
+      final requests = await remoteDataSource.getSpeakerRequests(roomId);
+      return Right(requests);
+    } on ServerException catch (e) {
+      return Left(ServerFailure(e.message));
+    } catch (e) {
+      return Left(ServerFailure(e.toString()));
+    }
+  }
+
+  @override
+  Future<Either<Failure, void>> approveSpeakerRequest({
+    required String requestId,
+    required String roomId,
+    required String userId,
+  }) async {
+    if (!await networkInfo.isConnected) {
+      return const Left(NetworkFailure());
+    }
+
+    try {
+      final currentUser = remoteDataSource.supabase.auth.currentUser;
+      if (currentUser == null) {
+        return const Left(AuthFailure('User not logged in'));
+      }
+
+      await remoteDataSource.approveSpeakerRequest(
+        requestId: requestId,
+        roomId: roomId,
+        userId: userId,
+        reviewedBy: currentUser.id,
+      );
+      return const Right(null);
+    } on ServerException catch (e) {
+      return Left(ServerFailure(e.message));
+    } catch (e) {
+      return Left(ServerFailure(e.toString()));
+    }
+  }
+
+  @override
+  Future<Either<Failure, void>> rejectSpeakerRequest({
+    required String requestId,
+  }) async {
+    if (!await networkInfo.isConnected) {
+      return const Left(NetworkFailure());
+    }
+
+    try {
+      final currentUser = remoteDataSource.supabase.auth.currentUser;
+      if (currentUser == null) {
+        return const Left(AuthFailure('User not logged in'));
+      }
+
+      await remoteDataSource.rejectSpeakerRequest(
+        requestId: requestId,
+        reviewedBy: currentUser.id,
+      );
+      return const Right(null);
+    } on ServerException catch (e) {
+      return Left(ServerFailure(e.message));
+    } catch (e) {
+      return Left(ServerFailure(e.toString()));
+    }
   }
 
   @override
@@ -184,8 +285,22 @@ class RoomRepositoryImpl implements RoomRepository {
     required String userId,
     required String newRole,
   }) async {
-    // TODO: Implement this
-    return const Left(ServerFailure('Not implemented yet'));
+    if (!await networkInfo.isConnected) {
+      return const Left(NetworkFailure());
+    }
+
+    try {
+      await remoteDataSource.updateParticipantRole(
+        roomId: roomId,
+        userId: userId,
+        newRole: newRole,
+      );
+      return const Right(null);
+    } on ServerException catch (e) {
+      return Left(ServerFailure(e.message));
+    } catch (e) {
+      return Left(ServerFailure(e.toString()));
+    }
   }
 
   @override
@@ -194,8 +309,22 @@ class RoomRepositoryImpl implements RoomRepository {
     required String userId,
     required bool mute,
   }) async {
-    // TODO: Implement this
-    return const Left(ServerFailure('Not implemented yet'));
+    if (!await networkInfo.isConnected) {
+      return const Left(NetworkFailure());
+    }
+
+    try {
+      await remoteDataSource.toggleMute(
+        roomId: roomId,
+        userId: userId,
+        mute: mute,
+      );
+      return const Right(null);
+    } on ServerException catch (e) {
+      return Left(ServerFailure(e.message));
+    } catch (e) {
+      return Left(ServerFailure(e.toString()));
+    }
   }
 
   @override
@@ -203,7 +332,20 @@ class RoomRepositoryImpl implements RoomRepository {
     required String roomId,
     required String userId,
   }) async {
-    // TODO: Implement this
-    return const Left(ServerFailure('Not implemented yet'));
+    if (!await networkInfo.isConnected) {
+      return const Left(NetworkFailure());
+    }
+
+    try {
+      await remoteDataSource.kickParticipant(
+        roomId: roomId,
+        userId: userId,
+      );
+      return const Right(null);
+    } on ServerException catch (e) {
+      return Left(ServerFailure(e.message));
+    } catch (e) {
+      return Left(ServerFailure(e.toString()));
+    }
   }
 }

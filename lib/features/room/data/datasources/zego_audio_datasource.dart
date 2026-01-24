@@ -94,6 +94,31 @@ class ZegoAudioDataSourceImpl implements ZegoAudioDataSource {
           ZegoAudioConfig.preset(ZegoAudioConfigPreset.StandardQuality));
       debugPrint('   ✓ Audio quality: Standard (48kbps)');
 
+      // Setup stream update callback to auto-play incoming audio
+      debugPrint('🔊 Setting up auto-play for incoming audio streams...');
+      ZegoExpressEngine.onRoomStreamUpdate =
+          (roomID, updateType, streamList, extendedData) {
+        debugPrint('\n📡 Stream Update in Room: $roomID');
+        debugPrint(
+            '   Update Type: ${updateType == ZegoUpdateType.Add ? "ADD" : "REMOVE"}');
+        debugPrint('   Streams: ${streamList.length}');
+
+        if (updateType == ZegoUpdateType.Add) {
+          // Auto-play all new streams (so audience can hear speakers)
+          for (var stream in streamList) {
+            debugPrint('   🎵 Auto-playing stream: ${stream.streamID}');
+            ZegoExpressEngine.instance.startPlayingStream(stream.streamID);
+          }
+        } else {
+          // Stop playing removed streams
+          for (var stream in streamList) {
+            debugPrint('   🛑 Stopping stream: ${stream.streamID}');
+            ZegoExpressEngine.instance.stopPlayingStream(stream.streamID);
+          }
+        }
+      };
+      debugPrint('   ✓ Auto-play enabled for all incoming streams');
+
       _isInitialized = true;
       debugPrint('\n✅ SUCCESS: Zego Engine initialized successfully!');
       debugPrint('=========================================\n');

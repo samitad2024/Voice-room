@@ -45,6 +45,21 @@ abstract class RoomRepository {
   /// Request to speak (audience → speaker request)
   Future<Either<Failure, void>> requestToSpeak(String roomId);
 
+  /// Get pending speaker requests for a room (owner/admin only)
+  Future<Either<Failure, List<dynamic>>> getSpeakerRequests(String roomId);
+
+  /// Approve speaker request (owner/admin only)
+  Future<Either<Failure, void>> approveSpeakerRequest({
+    required String requestId,
+    required String roomId,
+    required String userId,
+  });
+
+  /// Reject speaker request (owner/admin only)
+  Future<Either<Failure, void>> rejectSpeakerRequest({
+    required String requestId,
+  });
+
   /// Update participant role (owner/admin only)
   Future<Either<Failure, void>> updateParticipantRole({
     required String roomId,

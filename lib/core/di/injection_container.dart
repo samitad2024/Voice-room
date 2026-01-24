@@ -21,6 +21,10 @@ import '../../features/room/domain/repositories/room_repository.dart';
 import '../../features/room/domain/usecases/create_room.dart';
 import '../../features/room/domain/usecases/get_live_rooms.dart';
 import '../../features/room/domain/usecases/join_room.dart';
+import '../../features/room/domain/usecases/request_to_speak.dart';
+import '../../features/room/domain/usecases/get_speaker_requests.dart';
+import '../../features/room/domain/usecases/approve_speaker_request.dart';
+import '../../features/room/domain/usecases/reject_speaker_request.dart';
 import '../../features/room/presentation/bloc/room_bloc.dart';
 import '../network/network_info.dart';
 
@@ -98,6 +102,10 @@ void _initRoom() {
   sl.registerLazySingleton(() => GetLiveRooms(sl()));
   sl.registerLazySingleton(() => CreateRoom(sl()));
   sl.registerLazySingleton(() => JoinRoom(sl()));
+  sl.registerLazySingleton(() => RequestToSpeak(sl()));
+  sl.registerLazySingleton(() => GetSpeakerRequests(sl()));
+  sl.registerLazySingleton(() => ApproveSpeakerRequest(sl()));
+  sl.registerLazySingleton(() => RejectSpeakerRequest(sl()));
 
   // Bloc
   sl.registerFactory(

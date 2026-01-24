@@ -13,15 +13,56 @@ import 'features/home/presentation/pages/home_page.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  debugPrint(
+      '\n╔══════════════════════════════════════════════════════════════');
+  debugPrint('║ 🚀 SOCIAL VOICE APP STARTING');
+  debugPrint(
+      '╚══════════════════════════════════════════════════════════════\n');
+
   // Initialize Supabase with session persistence
+  debugPrint('⏳ Initializing Supabase...');
+  debugPrint('   URL: ${SupabaseConfig.projectUrl}');
   await Supabase.initialize(
     url: SupabaseConfig.projectUrl,
     anonKey: SupabaseConfig.anonKey,
     storageOptions: const StorageClientOptions(retryAttempts: 3),
   );
+  debugPrint('✅ Supabase initialized!\n');
+
+  // Listen for auth state changes
+  Supabase.instance.client.auth.onAuthStateChange.listen((data) {
+    final event = data.event;
+    final session = data.session;
+
+    debugPrint(
+        '\n╔══════════════════════════════════════════════════════════════');
+    debugPrint('║ 🔔 AUTH STATE CHANGE: $event');
+    debugPrint(
+        '╠══════════════════════════════════════════════════════════════');
+    if (session != null) {
+      debugPrint(
+          '║ 🔑 Access Token: ${session.accessToken.substring(0, 30)}...');
+      debugPrint('║ 👤 User ID: ${session.user.id}');
+      debugPrint('║ 📧 Email: ${session.user.email ?? "N/A"}');
+      debugPrint('║ 📱 Phone: ${session.user.phone ?? "N/A"}');
+      debugPrint(
+          '║ ⏱️ Expires At: ${session.expiresAt != null ? DateTime.fromMillisecondsSinceEpoch(session.expiresAt! * 1000) : "N/A"}');
+    } else {
+      debugPrint('║ ℹ️ No active session');
+    }
+    debugPrint(
+        '╚══════════════════════════════════════════════════════════════\n');
+  });
 
   // Initialize dependencies
+  debugPrint('⏳ Initializing dependencies...');
   await di.initializeDependencies();
+  debugPrint('✅ Dependencies initialized!\n');
+
+  debugPrint('╔══════════════════════════════════════════════════════════════');
+  debugPrint('║ ✅ APP INITIALIZATION COMPLETE - Starting UI');
+  debugPrint(
+      '╚══════════════════════════════════════════════════════════════\n');
 
   runApp(DevicePreview(builder: (context) => const MyApp()));
 }

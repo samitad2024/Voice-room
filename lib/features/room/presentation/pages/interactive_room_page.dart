@@ -1,17 +1,26 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:zego_express_engine/zego_express_engine.dart';
 import '../../../../core/di/injection_container.dart' as di;
 import '../../data/datasources/zego_audio_datasource.dart';
+import '../../data/datasources/room_realtime_service.dart';
+import '../../data/datasources/room_remote_datasource.dart';
 import '../../domain/entities/room.dart';
 import '../../domain/entities/live_room_participant.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../widgets/speaker_grid_widget.dart';
 import '../widgets/audience_list_widget.dart';
+import '../widgets/speaker_requests_widget.dart';
+import '../../../gifts/domain/entities/gift.dart';
+import '../../../gifts/data/datasources/gift_remote_datasource.dart';
+import '../../../gifts/presentation/widgets/gift_tray_widget.dart';
+import '../../../gifts/presentation/widgets/gift_animation_overlay.dart';
 
 /// Interactive Voice Room Page
 /// Features: Speaker grid, audience list, real-time updates, audio controls
+/// Follows blueprint.md specifications for voice rooms
 class InteractiveRoomPage extends StatefulWidget {
   final Room room;
 
@@ -28,18 +37,46 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
   late final ZegoAudioDataSource _zego;
+  late final RoomRealtimeService _realtimeService;
+  late final RoomRemoteDataSource _roomDataSource;
+
   bool _isMuted = false;
+
+  /// Whether Zego audio engine is initialized
+  bool _zegoInitialized = false;
+  bool _isLoading = true;
   String? _currentUserId;
   String _currentUserRole = 'audience';
+  String? _errorMessage;
 
-  // Mock data - TODO: Replace with real Supabase Realtime subscriptions
-  final List<LiveRoomParticipant> _speakers = [];
-  final List<LiveRoomParticipant> _audience = [];
+  // Real participants from Supabase Realtime
+  List<LiveRoomParticipant> _speakers = [];
+  List<LiveRoomParticipant> _audience = [];
+  StreamSubscription<List<LiveRoomParticipant>>? _participantsSubscription;
+
+  // Speaker requests for owners/admins
+  List<Map<String, dynamic>> _speakerRequests = [];
+  StreamSubscription<List<Map<String, dynamic>>>? _speakerRequestsSubscription;
+
+  // Gift system
+  List<Gift> _availableGifts = [];
+  int _userCoins = 0;
+  late final GiftRemoteDataSource _giftDataSource;
+  final StreamController<RoomGift> _giftStreamController =
+      StreamController<RoomGift>.broadcast();
+  RealtimeChannel? _giftsChannel;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+
+    // Initialize services
+    _zego = di.sl<ZegoAudioDataSource>();
+    _realtimeService = RoomRealtimeService(supabase: Supabase.instance.client);
+    _roomDataSource = di.sl<RoomRemoteDataSource>();
+    _giftDataSource =
+        GiftRemoteDataSourceImpl(supabase: Supabase.instance.client);
 
     // Get current user
     final authState = context.read<AuthBloc>().state;
@@ -47,28 +84,215 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
       _currentUserId = authState.user.uid;
       _currentUserRole =
           authState.user.uid == widget.room.ownerId ? 'owner' : 'audience';
-
-      // Add mock participants for demo
-      _addMockParticipants();
     }
 
-    // TODO: Subscribe to Supabase Realtime for participant updates
-
-    _zego = di.sl<ZegoAudioDataSource>();
-    _initZego();
+    // Initialize everything
+    _initializeRoom();
   }
 
+  /// Initialize room: subscribe to realtime + init Zego
+  Future<void> _initializeRoom() async {
+    try {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = null;
+      });
+
+      debugPrint(
+          '\n╔══════════════════════════════════════════════════════════════');
+      debugPrint('║ 🎵 INITIALIZING VOICE ROOM');
+      debugPrint(
+          '╠══════════════════════════════════════════════════════════════');
+      debugPrint('║ Room: ${widget.room.title}');
+      debugPrint('║ Room ID: ${widget.room.id}');
+      debugPrint('║ User: $_currentUserId');
+      debugPrint('║ Role: $_currentUserRole');
+      debugPrint(
+          '╚══════════════════════════════════════════════════════════════');
+
+      // Step 1: Subscribe to realtime participants
+      debugPrint('\n📡 Step 1: Setting up Realtime subscriptions...');
+      await _realtimeService.subscribeToRoom(widget.room.id);
+
+      // Listen to participant changes
+      _participantsSubscription = _realtimeService.participantsStream.listen(
+        (participants) {
+          if (mounted) {
+            setState(() {
+              _speakers = participants.where((p) => p.canSpeak).toList();
+              _audience = participants.where((p) => p.isAudience).toList();
+            });
+            debugPrint(
+                '   👥 Participants updated: ${_speakers.length} speakers, ${_audience.length} audience');
+
+            // Check if current user was kicked
+            final currentUser = participants.firstWhere(
+              (p) => p.userId == _currentUserId,
+              orElse: () => participants.first, // dummy value
+            );
+
+            if (currentUser.userId != _currentUserId) {
+              // Current user was kicked
+              debugPrint('   ⚠️  Current user was kicked from the room');
+              _handleKicked();
+              return;
+            }
+
+            // Check if admin muted current user (if speaker)
+            if (currentUser.canSpeak && currentUser.isMuted != _isMuted) {
+              debugPrint(
+                  '   🔇 Mute state changed by admin: ${currentUser.isMuted}');
+              setState(() {
+                _isMuted = currentUser.isMuted;
+              });
+
+              // Update Zego mute state
+              if (_isMuted) {
+                _zego.muteMicrophone(true);
+              } else {
+                _zego.muteMicrophone(false);
+              }
+
+              // Show notification
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    _isMuted
+                        ? 'You have been muted by the moderator'
+                        : 'You have been unmuted by the moderator',
+                  ),
+                  duration: const Duration(seconds: 3),
+                ),
+              );
+            }
+
+            // Update current user role if changed
+            if (currentUser.role != _currentUserRole) {
+              final oldRole = _currentUserRole;
+              final newRole = currentUser.role;
+              debugPrint('   👤 Role changed: $oldRole → $newRole');
+
+              setState(() {
+                _currentUserRole = newRole;
+              });
+
+              // If promoted to speaker, start publishing audio
+              if (oldRole == 'audience' && newRole == 'speaker') {
+                _handlePromotedToSpeaker();
+              }
+              // If demoted from speaker to audience, stop publishing
+              else if (oldRole == 'speaker' && newRole == 'audience') {
+                _handleDemotedToAudience();
+              }
+            }
+          }
+        },
+        onError: (error) {
+          debugPrint('   ❌ Realtime error: $error');
+        },
+      );
+
+      // Initial data
+      _speakers = _realtimeService.speakers;
+      _audience = _realtimeService.audience;
+
+      // Subscribe to speaker requests (for owners/admins)
+      if (_currentUserRole == 'owner' || _currentUserRole == 'admin') {
+        _speakerRequestsSubscription =
+            _realtimeService.speakerRequestsStream.listen(
+          (requests) {
+            if (mounted) {
+              setState(() {
+                _speakerRequests = requests;
+              });
+              debugPrint(
+                  '   🔔 Speaker requests updated: ${requests.length} pending');
+            }
+          },
+          onError: (error) {
+            debugPrint('   ❌ Speaker requests error: $error');
+          },
+        );
+
+        // Initial requests data
+        _speakerRequests = _realtimeService.speakerRequests;
+      }
+
+      // Step 2: Initialize Zego voice
+      debugPrint('\n🎤 Step 2: Initializing Zego voice engine...');
+      await _initZego();
+
+      // Step 3: Load gifts and user balance
+      debugPrint('\n🎁 Step 3: Loading gifts and user balance...');
+      await _loadGiftsAndBalance();
+
+      // Step 4: Subscribe to gift stream
+      debugPrint('\n🎁 Step 4: Subscribing to gift stream...');
+      _subscribeToGifts();
+
+      setState(() {
+        _isLoading = false;
+        _zegoInitialized = true;
+      });
+
+      // Show success message
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.check_circle, color: Colors.white),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _currentUserRole == 'owner'
+                        ? 'Room created! You are the host.'
+                        : 'Joined room successfully!',
+                  ),
+                ),
+              ],
+            ),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e, stackTrace) {
+      debugPrint('\n❌ Room initialization failed: $e');
+      debugPrint(stackTrace.toString());
+
+      setState(() {
+        _isLoading = false;
+        _errorMessage = e.toString();
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+                'Failed to join room: ${e.toString().split(':').last.trim()}'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 5),
+            action: SnackBarAction(
+              label: 'Retry',
+              textColor: Colors.white,
+              onPressed: _initializeRoom,
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  /// Initialize Zego voice engine and join room
   Future<void> _initZego() async {
     try {
-      debugPrint('\n🎵 ===== INITIALIZING VOICE CHAT =====');
-      debugPrint('Room: ${widget.room.title} (${widget.room.id})');
-
       // 1. Initialize Engine
-      debugPrint('\nStep 1: Initializing Zego Engine...');
+      debugPrint('\n   🎤 Initializing Zego Engine...');
       await _zego.initEngine();
 
       // 2. Set Callbacks
-      debugPrint('\nStep 2: Setting up connection callbacks...');
+      debugPrint('   📡 Setting up connection callbacks...');
       _zego.setRoomStateUpdateCallback((roomID, state) {
         if (!mounted) return;
 
@@ -79,26 +303,6 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
         // Handle room state changes (disconnected, connecting, connected)
         if (state == ZegoRoomState.Connected) {
           debugPrint('   🎉 STATUS: Successfully connected to voice chat!');
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Row(
-                  children: [
-                    Icon(Icons.check_circle, color: Colors.white),
-                    SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        'Connected to voice chat',
-                        style: TextStyle(fontSize: 16),
-                      ),
-                    ),
-                  ],
-                ),
-                backgroundColor: Colors.green,
-                duration: Duration(seconds: 2),
-              ),
-            );
-          }
         } else if (state == ZegoRoomState.Disconnected) {
           debugPrint('   ⚠️  STATUS: Disconnected from voice chat');
           if (mounted) {
@@ -121,10 +325,7 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
                 action: SnackBarAction(
                   label: 'Retry',
                   textColor: Colors.white,
-                  onPressed: () {
-                    debugPrint('🔄 User requested reconnection...');
-                    _initZego();
-                  },
+                  onPressed: _initializeRoom,
                 ),
               ),
             );
@@ -135,15 +336,22 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
       });
 
       // 3. Get Token & Join
-      debugPrint('\nStep 3: Authenticating user...');
+      debugPrint(
+          '\n╔══════════════════════════════════════════════════════════════');
+      debugPrint('║ 🔑 REQUESTING ZEGO TOKEN FROM SUPABASE EDGE FUNCTION');
+      debugPrint(
+          '╚══════════════════════════════════════════════════════════════');
+
       if (_currentUserId == null) {
         throw Exception('User ID is null. Please login first.');
       }
 
-      debugPrint('   Requesting authentication token from server...');
-      debugPrint('   User ID: $_currentUserId');
-      debugPrint('   Room ID: ${widget.room.id}');
+      debugPrint('   📤 OUTGOING REQUEST:');
+      debugPrint('   ├─ Function: generate-zego-token');
+      debugPrint('   ├─ User ID: $_currentUserId');
+      debugPrint('   └─ Room ID: ${widget.room.id}');
 
+      final stopwatch = Stopwatch()..start();
       final response = await Supabase.instance.client.functions.invoke(
         'generate-zego-token',
         body: {
@@ -151,36 +359,43 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
           'roomId': widget.room.id,
         },
       );
+      stopwatch.stop();
 
-      debugPrint('   Server Response Status: ${response.status}');
+      debugPrint('\n   📥 INCOMING RESPONSE:');
+      debugPrint('   ├─ Status Code: ${response.status}');
+      debugPrint('   ├─ Response Time: ${stopwatch.elapsedMilliseconds}ms');
+      debugPrint('   └─ Response Data: ${response.data}');
 
       if (response.status != 200) {
-        debugPrint(
-            '   ❌ Token generation failed with status ${response.status}');
-        throw Exception(
-            'Token generation failed: ${response.status}\nPlease ensure Edge Function is deployed.');
+        throw Exception('Token generation failed: ${response.status}');
       }
 
       final responseData = response.data as Map<String, dynamic>?;
       if (responseData == null || responseData['token'] == null) {
-        debugPrint('   ❌ Invalid token response: ${response.data}');
-        throw Exception('Invalid token response: ${response.data}');
+        throw Exception('Invalid token response');
       }
 
       final token = responseData['token'] as String;
-      debugPrint('   ✅ Authentication token received');
-      debugPrint('   Token length: ${token.length} characters');
+      debugPrint('\n   ✅ TOKEN RECEIVED SUCCESSFULLY!');
+      debugPrint('   ├─ App ID: ${responseData['appID']}');
+      debugPrint('   ├─ Token Length: ${token.length} chars');
+      debugPrint('   └─ Expires In: ${responseData['expiresIn']} seconds');
 
+      // 4. Join Zego Room
       final authState = context.read<AuthBloc>().state;
       final userName = authState is AuthAuthenticated
           ? (authState.user.name ?? 'User')
           : 'Guest';
 
       final isHost = _currentUserRole == 'owner';
-      debugPrint('\nStep 4: Joining voice room...');
-      debugPrint('   User Name: $userName');
       debugPrint(
-          '   Role: ${isHost ? "Host (Speaker)" : "Audience (Listener)"}');
+          '\n╔══════════════════════════════════════════════════════════════');
+      debugPrint('║ 🚪 JOINING ZEGO VOICE ROOM');
+      debugPrint(
+          '╚══════════════════════════════════════════════════════════════');
+      debugPrint('   ├─ Room ID: ${widget.room.id}');
+      debugPrint('   ├─ User: $userName ($_currentUserId)');
+      debugPrint('   └─ Role: ${isHost ? "Host (Speaker)" : "Audience"}');
 
       await _zego.joinRoom(
         roomId: widget.room.id,
@@ -190,141 +405,173 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
         isSpeaker: isHost,
       );
 
-      debugPrint('\n✅ SUCCESS: Voice chat initialization complete!');
-      debugPrint('=========================================\n');
+      debugPrint(
+          '\n╔══════════════════════════════════════════════════════════════');
+      debugPrint('║ ✅ VOICE CHAT INITIALIZATION COMPLETE!');
+      debugPrint(
+          '╚══════════════════════════════════════════════════════════════\n');
     } catch (e, stackTrace) {
-      debugPrint('\n❌❌❌ CRITICAL ERROR: Voice chat initialization failed ❌❌❌');
-      debugPrint('Error Type: ${e.runtimeType}');
-      debugPrint('Error Message: $e');
+      debugPrint('\n❌ ZEGO INITIALIZATION FAILED: $e');
+      debugPrint(stackTrace.toString());
+      rethrow;
+    }
+  }
 
-      // Provide user-friendly error explanation
-      String userMessage = 'Voice Chat Error';
-      String detailMessage = e.toString();
+  /// Handle leaving the room
+  Future<void> _leaveRoom() async {
+    try {
+      debugPrint(
+          '\n╔══════════════════════════════════════════════════════════════');
+      debugPrint('║ 🚪 LEAVING ROOM');
+      debugPrint(
+          '╚══════════════════════════════════════════════════════════════');
 
-      if (e.toString().contains('50119') ||
-          e.toString().contains('token auth')) {
-        debugPrint('\n🔍 ERROR CATEGORY: Authentication Failure');
-        userMessage = 'Authentication Failed';
-        detailMessage =
-            'Unable to authenticate with voice server. Please try again or contact support.';
-        debugPrint(
-            '💡 User Action: Try rejoining or check Edge Function deployment');
-      } else if (e.toString().contains('network') ||
-          e.toString().contains('connection')) {
-        debugPrint('\n🔍 ERROR CATEGORY: Network Connection Issue');
-        userMessage = 'Connection Failed';
-        detailMessage = 'Please check your internet connection and try again.';
-        debugPrint('💡 User Action: Check network connectivity');
-      } else if (e.toString().contains('permission')) {
-        debugPrint('\n🔍 ERROR CATEGORY: Permission Denied');
-        userMessage = 'Microphone Access Denied';
-        detailMessage =
-            'Please enable microphone permissions in your device settings.';
-        debugPrint('💡 User Action: Grant microphone permissions');
-      } else if (e.toString().contains('Token generation failed')) {
-        debugPrint('\n🔍 ERROR CATEGORY: Server Configuration Issue');
-        userMessage = 'Server Error';
-        detailMessage =
-            'Voice service is temporarily unavailable. Please try again later.';
-        debugPrint('💡 Admin Action: Deploy or check Edge Function');
-      } else if (e.toString().contains('User ID is null')) {
-        debugPrint('\n🔍 ERROR CATEGORY: User Not Logged In');
-        userMessage = 'Please Login First';
-        detailMessage = 'You must be logged in to join voice chat.';
-        debugPrint('💡 User Action: Login to account');
+      // Leave Zego room
+      await _zego.leaveRoom(widget.room.id);
+      debugPrint('   ✅ Left Zego room');
+
+      // Update database - mark as offline/left
+      if (_currentUserId != null) {
+        await _roomDataSource.leaveRoom(
+          roomId: widget.room.id,
+          userId: _currentUserId!,
+        );
+        debugPrint('   ✅ Updated database');
       }
 
-      debugPrint('\n💬 User-Facing Message:');
-      debugPrint('   Title: $userMessage');
-      debugPrint('   Details: $detailMessage');
+      // Unsubscribe from realtime
+      await _realtimeService.unsubscribe();
+      debugPrint('   ✅ Unsubscribed from realtime');
+    } catch (e) {
+      debugPrint('   ❌ Error leaving room: $e');
+    }
+  }
 
-      debugPrint('\n📋 Full Stack Trace:');
-      debugPrint(stackTrace.toString());
-      debugPrint('=========================================\n');
+  /// Handle mute/unmute
+  Future<void> _toggleMute() async {
+    try {
+      setState(() => _isMuted = !_isMuted);
+      await _zego.muteMicrophone(_isMuted);
+
+      // Update database
+      if (_currentUserId != null) {
+        await _realtimeService.updateMuteStatus(
+          widget.room.id,
+          _currentUserId!,
+          _isMuted,
+        );
+      }
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
+            content: Text(
+                _isMuted ? '🔇 Microphone muted' : '🔊 Microphone unmuted'),
+            duration: const Duration(seconds: 1),
+            backgroundColor: _isMuted ? Colors.orange : Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('   ❌ Error toggling mute: $e');
+    }
+  }
+
+  /// Handle when user is promoted to speaker
+  Future<void> _handlePromotedToSpeaker() async {
+    try {
+      debugPrint('\n🎤 ===== USER PROMOTED TO SPEAKER =====');
+      debugPrint('   Starting audio publishing...');
+
+      // Start publishing audio stream
+      final streamId = '${widget.room.id}_${_currentUserId}_main';
+      await _zego.startPublishing(streamId);
+
+      debugPrint('   ✅ Now publishing audio as speaker!');
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Row(
               children: [
-                Row(
-                  children: [
-                    const Icon(Icons.error, color: Colors.white),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        userMessage,
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  detailMessage,
-                  style: const TextStyle(fontSize: 14),
+                Icon(Icons.mic, color: Colors.white),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '🎉 You are now a speaker! Your microphone is live.',
+                    style: TextStyle(fontSize: 14),
+                  ),
                 ),
               ],
             ),
-            backgroundColor: Colors.red.shade700,
-            duration: const Duration(seconds: 8),
-            action: SnackBarAction(
-              label: 'Retry',
-              textColor: Colors.white,
-              onPressed: () {
-                debugPrint('🔄 User initiated retry...');
-                _initZego();
-              },
-            ),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('   ❌ Error starting audio publishing: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to start audio: $e'),
+            backgroundColor: Colors.red,
           ),
         );
       }
     }
   }
 
-  void _addMockParticipants() {
-    // Add owner as speaker
-    _speakers.add(LiveRoomParticipant(
-      roomId: widget.room.id,
-      userId: widget.room.ownerId,
-      role: 'owner',
-      networkQuality: 'excellent',
-      lastSeen: DateTime.now(),
-    ));
+  /// Handle when user is demoted from speaker to audience
+  Future<void> _handleDemotedToAudience() async {
+    try {
+      debugPrint('\n👂 ===== USER DEMOTED TO AUDIENCE =====');
+      debugPrint('   Stopping audio publishing...');
 
-    // Add some mock speakers
-    for (int i = 0; i < 4; i++) {
-      _speakers.add(LiveRoomParticipant(
-        roomId: widget.room.id,
-        userId: 'speaker_$i',
-        role: i == 0 ? 'admin' : 'speaker',
-        isMuted: i % 3 == 0,
-        networkQuality: i % 2 == 0 ? 'good' : 'excellent',
-        lastSeen: DateTime.now(),
-      ));
-    }
+      // Stop publishing audio stream
+      await _zego.stopPublishing();
 
-    // Add mock audience
-    for (int i = 0; i < 15; i++) {
-      _audience.add(LiveRoomParticipant(
-        roomId: widget.room.id,
-        userId: 'audience_$i',
-        isOnline: i % 4 != 0,
-        lastSeen: DateTime.now().subtract(Duration(minutes: i)),
-      ));
+      debugPrint('   ✅ Stopped publishing audio');
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Row(
+              children: [
+                Icon(Icons.hearing, color: Colors.white),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'You are now in the audience. Listening mode activated.',
+                    style: TextStyle(fontSize: 14),
+                  ),
+                ),
+              ],
+            ),
+            backgroundColor: Colors.orange,
+            duration: Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('   ❌ Error stopping audio publishing: $e');
     }
   }
 
   @override
   void dispose() {
+    debugPrint('🧹 Disposing InteractiveRoomPage...');
+    _participantsSubscription?.cancel();
+    _speakerRequestsSubscription?.cancel();
+    _giftStreamController.close();
+    if (_giftsChannel != null) {
+      Supabase.instance.client.removeChannel(_giftsChannel!);
+    }
     _tabController.dispose();
-    _zego.leaveRoom(widget.room.id);
-    // TODO: cleanup Realtime subscriptions
+    if (_zegoInitialized) {
+      _leaveRoom();
+    }
+    _realtimeService.dispose();
     super.dispose();
   }
 
@@ -334,6 +581,64 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
     final isOwnerOrAdmin =
         _currentUserRole == 'owner' || _currentUserRole == 'admin';
     final isSpeaker = _speakers.any((s) => s.userId == _currentUserId);
+
+    // Show loading state
+    if (_isLoading) {
+      return Scaffold(
+        backgroundColor: colorScheme.surfaceContainerLowest,
+        appBar: AppBar(
+          title: Text(widget.room.title),
+          backgroundColor: Colors.transparent,
+        ),
+        body: const Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(),
+              SizedBox(height: 16),
+              Text('Joining room...'),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Show error state
+    if (_errorMessage != null) {
+      return Scaffold(
+        backgroundColor: colorScheme.surfaceContainerLowest,
+        appBar: AppBar(
+          title: Text(widget.room.title),
+          backgroundColor: Colors.transparent,
+        ),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.error_outline, size: 64, color: Colors.red),
+              const SizedBox(height: 16),
+              Text('Failed to join room',
+                  style: Theme.of(context).textTheme.headlineSmall),
+              const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 32),
+                child: Text(
+                  _errorMessage!,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: colorScheme.onSurfaceVariant),
+                ),
+              ),
+              const SizedBox(height: 24),
+              FilledButton.icon(
+                onPressed: _initializeRoom,
+                icon: const Icon(Icons.refresh),
+                label: const Text('Retry'),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
 
     return Scaffold(
       backgroundColor: colorScheme.surfaceContainerLowest,
@@ -500,6 +805,24 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
 
           const SizedBox(height: 16),
 
+          // Speaker Requests (for owners/admins)
+          if (_speakerRequests.isNotEmpty &&
+              (_currentUserRole == 'owner' || _currentUserRole == 'admin'))
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: SpeakerRequestsWidget(
+                roomId: widget.room.id,
+                requests: _speakerRequests,
+                onRequestProcessed: () {
+                  // Refresh handled by real-time subscription
+                },
+              ),
+            ),
+
+          if (_speakerRequests.isNotEmpty &&
+              (_currentUserRole == 'owner' || _currentUserRole == 'admin'))
+            const SizedBox(height: 16),
+
           // Speaker Grid
           if (_speakers.isNotEmpty)
             Padding(
@@ -615,6 +938,12 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
           _buildControlPanel(colorScheme, isSpeaker),
         ],
       ),
+
+      // Gift Animation Overlay
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+      floatingActionButton: GiftAnimationOverlay(
+        giftStream: _giftStreamController.stream,
+      ),
     );
   }
 
@@ -689,10 +1018,7 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
                 colorScheme,
                 icon: _isMuted ? Icons.mic_off : Icons.mic,
                 label: _isMuted ? 'Unmute' : 'Mute',
-                onPressed: () {
-                  setState(() => _isMuted = !_isMuted);
-                  // TODO: Call Zego muteMicrophone
-                },
+                onPressed: _toggleMute,
                 color: _isMuted ? Colors.red : null,
               )
             else
@@ -704,6 +1030,15 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
                 onPressed: _handleRequestToSpeak,
                 color: Colors.blue,
               ),
+
+            // Gift button
+            _buildControlButton(
+              colorScheme,
+              icon: Icons.card_giftcard,
+              label: 'Gift',
+              onPressed: _showGiftTray,
+              color: Colors.amber,
+            ),
 
             // Leave button
             _buildControlButton(
@@ -775,7 +1110,110 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
   }
 
   void _handleSpeakerTap(LiveRoomParticipant speaker) {
-    // TODO: Show speaker actions (view profile, mute if admin, etc.)
+    final isOwnerOrAdmin =
+        _currentUserRole == 'owner' || _currentUserRole == 'admin';
+    final canModerate = isOwnerOrAdmin && speaker.userId != _currentUserId;
+
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // User info header
+            Padding(
+              padding: const EdgeInsets.only(bottom: 16),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 24,
+                    backgroundColor:
+                        Theme.of(context).colorScheme.primaryContainer,
+                    child: Icon(
+                      Icons.person,
+                      color: Theme.of(context).colorScheme.onPrimaryContainer,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          speaker.userId.length > 20
+                              ? '${speaker.userId.substring(0, 20)}...'
+                              : speaker.userId,
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                        Text(
+                          speaker.role == 'owner'
+                              ? 'Host'
+                              : speaker.role.toUpperCase(),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color:
+                                Theme.of(context).colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // View Profile
+            ListTile(
+              leading: const Icon(Icons.person),
+              title: const Text('View Profile'),
+              onTap: () {
+                Navigator.pop(context);
+                // TODO: Navigate to profile
+              },
+            ),
+
+            // Mute/Unmute (for admins)
+            if (canModerate)
+              ListTile(
+                leading: Icon(
+                  speaker.isMuted ? Icons.mic : Icons.mic_off,
+                  color: Colors.orange,
+                ),
+                title: Text(speaker.isMuted ? 'Unmute' : 'Mute'),
+                onTap: () async {
+                  Navigator.pop(context);
+                  await _handleAdminMute(speaker);
+                },
+              ),
+
+            // Kick participant (for owner/admin, can't kick owner)
+            if (canModerate && speaker.role != 'owner')
+              ListTile(
+                leading: const Icon(Icons.exit_to_app, color: Colors.red),
+                title: const Text(
+                  'Kick from Room',
+                  style: TextStyle(color: Colors.red),
+                ),
+                onTap: () {
+                  Navigator.pop(context);
+                  _handleKickParticipant(speaker);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _handleAudienceTap(LiveRoomParticipant member) {
+    // Show audience member options
+    final isOwnerOrAdmin =
+        _currentUserRole == 'owner' || _currentUserRole == 'admin';
+
     showModalBottomSheet(
       context: context,
       builder: (context) => Container(
@@ -791,16 +1229,18 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
                 // TODO: Navigate to profile
               },
             ),
-            if (_currentUserRole == 'owner' || _currentUserRole == 'admin')
+
+            // Kick participant (for owner/admin)
+            if (isOwnerOrAdmin && member.userId != _currentUserId)
               ListTile(
-                leading: Icon(
-                  speaker.isMuted ? Icons.mic : Icons.mic_off,
-                  color: Colors.orange,
+                leading: const Icon(Icons.exit_to_app, color: Colors.red),
+                title: const Text(
+                  'Kick from Room',
+                  style: TextStyle(color: Colors.red),
                 ),
-                title: Text(speaker.isMuted ? 'Unmute' : 'Mute'),
                 onTap: () {
                   Navigator.pop(context);
-                  // TODO: Toggle mute via Supabase + Zego
+                  _handleKickParticipant(member);
                 },
               ),
           ],
@@ -809,18 +1249,382 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
     );
   }
 
-  void _handleAudienceTap(LiveRoomParticipant member) {
-    // TODO: Show audience member profile
+  /// Admin mutes/unmutes a speaker
+  Future<void> _handleAdminMute(LiveRoomParticipant speaker) async {
+    try {
+      debugPrint(
+          '\n🔇 Admin ${speaker.isMuted ? "unmuting" : "muting"} speaker: ${speaker.userId}');
+
+      final newMutedState = !speaker.isMuted;
+
+      // Update in Supabase
+      await _roomDataSource.toggleMute(
+        roomId: widget.room.id,
+        userId: speaker.userId,
+        mute: newMutedState,
+      );
+
+      // If muting, also mute in Zego (remote mute)
+      if (newMutedState) {
+        // Note: Zego SDK doesn't support remote mute directly
+        // The speaker's client should listen to the database change and mute locally
+        debugPrint(
+            '   ℹ️  Speaker should mute locally based on database update');
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              newMutedState ? 'Speaker muted' : 'Speaker unmuted',
+            ),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('❌ Error toggling mute: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+                'Failed to ${speaker.isMuted ? "unmute" : "mute"} speaker'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
   }
 
-  void _handleRequestToSpeak() {
-    // TODO: Insert speaker request into Supabase
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Request sent! Waiting for approval...'),
-        duration: Duration(seconds: 2),
+  /// Kick participant from room
+  Future<void> _handleKickParticipant(LiveRoomParticipant participant) async {
+    // Show confirmation dialog
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Kick Participant'),
+        content: Text(
+          'Are you sure you want to kick this user from the room?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('Kick'),
+          ),
+        ],
       ),
     );
+
+    if (confirmed != true) return;
+
+    try {
+      debugPrint('\n🚪 Kicking participant: ${participant.userId}');
+
+      // Kick from database
+      await _roomDataSource.kickParticipant(
+        roomId: widget.room.id,
+        userId: participant.userId,
+      );
+
+      debugPrint('   ✅ Participant kicked from database');
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Participant removed from room'),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('❌ Error kicking participant: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to kick participant: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  /// Handle when current user is kicked
+  void _handleKicked() {
+    debugPrint('\n⚠️  You have been kicked from the room');
+
+    // Leave Zego room immediately
+    _leaveRoom();
+
+    // Navigate back and show message
+    if (mounted) {
+      Navigator.pop(context);
+
+      // Show message after a brief delay to ensure navigation completes
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('You have been removed from the room'),
+              backgroundColor: Colors.red,
+              duration: Duration(seconds: 4),
+            ),
+          );
+        }
+      });
+    }
+  }
+
+  /// Subscribe to real-time gift updates
+  void _subscribeToGifts() {
+    _giftsChannel = Supabase.instance.client
+        .channel('room_gifts:${widget.room.id}')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'room_gifts',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'room_id',
+            value: widget.room.id,
+          ),
+          callback: (payload) async {
+            debugPrint('\n🎁 New gift received in room!');
+            try {
+              // Fetch full gift details with joins
+              final giftData =
+                  await Supabase.instance.client.from('room_gifts').select('''
+                    *,
+                    sender:sender_id (name, photo_url),
+                    receiver:receiver_id (name),
+                    gift:gift_id (name, image_url, coin_cost, animation_type)
+                  ''').eq('id', payload.newRecord['id']).single();
+
+              // Parse to RoomGift
+              final roomGift = RoomGift(
+                id: giftData['id'] as String,
+                roomId: giftData['room_id'] as String,
+                senderId: giftData['sender_id'] as String,
+                senderName: giftData['sender']?['name'] as String?,
+                senderPhotoUrl: giftData['sender']?['photo_url'] as String?,
+                receiverId: giftData['receiver_id'] as String,
+                receiverName: giftData['receiver']?['name'] as String?,
+                giftId: giftData['gift_id'] as String,
+                giftName: giftData['gift']?['name'] as String? ?? 'Gift',
+                giftImageUrl: giftData['gift']?['image_url'] as String? ?? '',
+                coinValue: giftData['coin_value'] as int? ?? 0,
+                animationType:
+                    giftData['gift']?['animation_type'] as String? ?? 'simple',
+                createdAt: DateTime.parse(giftData['created_at'] as String),
+              );
+
+              // Add to stream for animation
+              _giftStreamController.add(roomGift);
+
+              debugPrint('   ✅ Gift animation triggered');
+            } catch (e) {
+              debugPrint('   ❌ Error processing gift: $e');
+            }
+          },
+        )
+        .subscribe();
+
+    debugPrint('   ✅ Subscribed to gift stream');
+  }
+
+  /// Load available gifts and user coin balance
+  Future<void> _loadGiftsAndBalance() async {
+    try {
+      // Load available gifts
+      final gifts = await _giftDataSource.getAvailableGifts();
+
+      // Get user coin balance
+      final userResponse = await Supabase.instance.client
+          .from('users')
+          .select('coins')
+          .eq('id', _currentUserId!)
+          .single();
+
+      if (mounted) {
+        setState(() {
+          _availableGifts = gifts;
+          _userCoins = userResponse['coins'] as int? ?? 0;
+        });
+        debugPrint(
+            '   ✅ Loaded ${_availableGifts.length} gifts, balance: $_userCoins coins');
+      }
+    } catch (e) {
+      debugPrint('   ⚠️  Failed to load gifts: $e');
+      // Non-critical, continue without gifts
+    }
+  }
+
+  /// Show gift tray bottom sheet
+  void _showGiftTray() {
+    // Get speakers who can receive gifts (excluding current user)
+    final recipients = _speakers
+        .where((s) => s.userId != _currentUserId)
+        .map((s) => s.userId)
+        .toList();
+
+    if (recipients.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('No speakers available to receive gifts'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
+    // Build recipient names map
+    final recipientNames = <String, String>{};
+    for (final speaker in _speakers) {
+      if (speaker.userId != _currentUserId) {
+        recipientNames[speaker.userId] = speaker.userName ?? 'User';
+      }
+    }
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => GiftTrayWidget(
+        gifts: _availableGifts,
+        recipients: recipients,
+        recipientNames: recipientNames,
+        userCoins: _userCoins,
+        onSendGift: (giftId, recipientId) {
+          _handleSendGift(giftId, recipientId);
+        },
+      ),
+    );
+  }
+
+  /// Handle sending a gift
+  Future<void> _handleSendGift(String giftId, String recipientId) async {
+    try {
+      debugPrint('\\n🎁 Sending gift: $giftId to $recipientId');
+
+      // Show loading
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Row(
+              children: [
+                SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                ),
+                SizedBox(width: 12),
+                Text('Sending gift...'),
+              ],
+            ),
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+
+      // Send gift via datasource
+      final roomGift = await _giftDataSource.sendGift(
+        roomId: widget.room.id,
+        senderId: _currentUserId!,
+        receiverId: recipientId,
+        giftId: giftId,
+      );
+
+      debugPrint('   ✅ Gift sent successfully!');
+
+      // Reload balance
+      await _loadGiftsAndBalance();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.check_circle, color: Colors.white),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Gift sent to ${roomGift.receiverName ?? "user"}!',
+                  ),
+                ),
+              ],
+            ),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('❌ Error sending gift: $e');
+      if (mounted) {
+        String errorMessage = 'Failed to send gift';
+        if (e.toString().contains('Insufficient')) {
+          errorMessage = 'Insufficient coins';
+        }
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(errorMessage),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    }
+  }
+
+  void _handleRequestToSpeak() async {
+    try {
+      debugPrint('\n🎤 User requesting to speak...');
+
+      // Use the datasource directly for now (could be moved to use case later)
+      await _roomDataSource.requestToSpeak(
+        roomId: widget.room.id,
+        userId: _currentUserId!,
+      );
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: const [
+                Icon(Icons.front_hand, color: Colors.white),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text('Request sent! Waiting for host approval...'),
+                ),
+              ],
+            ),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('❌ Error requesting to speak: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+                'Failed to send request: ${e.toString().split(':').last.trim()}'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    }
   }
 
   void _handleLeaveRoom(BuildContext context) {
@@ -913,7 +1717,7 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
       builder: (context) => AlertDialog(
         title: const Text('End Room'),
         content: const Text(
-          'Are you sure you want to end this room? All participants will be removed.',
+          'Are you sure you want to end this room? All participants will be removed and the room will be closed.',
         ),
         actions: [
           TextButton(
@@ -921,10 +1725,9 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
             child: const Text('Cancel'),
           ),
           FilledButton(
-            onPressed: () {
+            onPressed: () async {
               Navigator.pop(context); // Close dialog
-              Navigator.pop(context); // Leave room page
-              // TODO: End room in Supabase, kick all participants
+              await _endRoom();
             },
             style: FilledButton.styleFrom(backgroundColor: Colors.red),
             child: const Text('End Room'),
@@ -932,5 +1735,66 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
         ],
       ),
     );
+  }
+
+  /// End the room and cleanup
+  Future<void> _endRoom() async {
+    try {
+      debugPrint('\n🛑 Ending room: ${widget.room.id}');
+
+      // Show loading
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Row(
+              children: [
+                SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: Colors.white,
+                  ),
+                ),
+                SizedBox(width: 12),
+                Text('Ending room...'),
+              ],
+            ),
+            duration: Duration(seconds: 10),
+          ),
+        );
+      }
+
+      // End room in database
+      await _roomDataSource.endRoom(widget.room.id);
+
+      debugPrint('   ✅ Room ended in database');
+
+      // Leave Zego room
+      await _leaveRoom();
+
+      // Navigate back
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Room ended successfully'),
+            backgroundColor: Colors.green,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('❌ Error ending room: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to end room: $e'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    }
   }
 }
