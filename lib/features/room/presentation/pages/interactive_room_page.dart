@@ -46,6 +46,7 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
   bool _zegoInitialized = false;
   bool _isLoading = true;
   String? _currentUserId;
+  String? _zegoUserId;
   String _currentUserRole = 'audience';
   String? _errorMessage;
 
@@ -82,6 +83,10 @@ class _InteractiveRoomPageState extends State<InteractiveRoomPage>
     final authState = context.read<AuthBloc>().state;
     if (authState is AuthAuthenticated) {
       _currentUserId = authState.user.uid;
+      // Zego User ID length constraint
+      _zegoUserId = _currentUserId!.length > 20
+          ? _currentUserId!.substring(0, 20)
+          : _currentUserId!;
       _currentUserRole =
           authState.user.uid == widget.room.ownerId ? 'owner' : 'audience';
     }
