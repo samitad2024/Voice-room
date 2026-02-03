@@ -1,12 +1,12 @@
-/// Zego Cloud Configuration
-/// IMPORTANT: Never expose AppSign in client code
-/// Tokens must be generated server-side via Edge Functions
+/// Zego Cloud Configuration for Prebuilt Live Audio Room UIKit
+/// Updated: January 30, 2026
 class ZegoConfig {
-  // Zego App ID from console
-  static const int appID = 424135686;
+  // Zego App ID from console (NEW CREDENTIALS)
+  static const int appID = 1434265091;
 
-  // DO NOT store AppSign here! Generate tokens server-side
-  // static const String appSign = ''; // NEVER STORE THIS
+  // App Sign for token generation (used in Prebuilt UIKit)
+  static const String appSign =
+      'c0521ffb2b89cc4ed257fda942aa4279318e972063bdc1d5257eb935929a5942';
 
   // Audio settings
   static const int standardBitrate = 48; // kbps - standard quality
