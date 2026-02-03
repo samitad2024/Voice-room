@@ -89,6 +89,8 @@ void _initRoom() {
   sl.registerLazySingleton<RoomRemoteDataSource>(
     () => RoomRemoteDataSourceImpl(supabase: sl()),
   );
+
+  // Zego Audio Engine for Express Engine
   sl.registerLazySingleton<ZegoAudioDataSource>(
     () => ZegoAudioDataSourceImpl(),
   );
