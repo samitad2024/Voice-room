@@ -280,6 +280,20 @@ class ZegoAudioDataSourceImpl implements ZegoAudioDataSource {
         throw ServerException('Zego engine not initialized');
       }
 
+      // CRITICAL: Request microphone permission first (especially for web)
+      debugPrint('🎙️  Requesting microphone permissions...');
+      try {
+        // Enable microphone (this will trigger browser permission prompt)
+        await _engine!.muteMicrophone(false);
+        debugPrint('✅ Microphone access granted');
+      } catch (permError) {
+        debugPrint('❌ Microphone permission denied or unavailable');
+        debugPrint('Error: $permError');
+        throw ServerException(
+          'Microphone permission denied. Please allow microphone access in your browser settings.',
+        );
+      }
+
       debugPrint('🔊 Publishing audio stream...');
       await _engine!.startPublishingStream(streamId);
       debugPrint('✅ SUCCESS: Audio stream started');
