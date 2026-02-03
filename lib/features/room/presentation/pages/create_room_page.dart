@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../bloc/room_bloc.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
-import 'interactive_room_page.dart';
+import 'prebuilt_audio_room_page.dart';
 
 /// Create Room Dialog
 /// Allows users to create new voice chat rooms
@@ -130,10 +130,13 @@ class _CreateRoomDialogState extends State<CreateRoomDialog> {
         if (state is RoomCreated) {
           Navigator.of(context).pop(); // Close dialog
 
-          // Navigate to the room
+          // Navigate to the room as host (creator)
           Navigator.of(context).push(
             MaterialPageRoute(
-              builder: (context) => InteractiveRoomPage(room: state.room),
+              builder: (context) => PrebuiltAudioRoomPage(
+                room: state.room,
+                isHost: true, // Creator is the host
+              ),
             ),
           );
 
