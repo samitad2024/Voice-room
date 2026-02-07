@@ -5,7 +5,7 @@ import '../../../../core/di/injection_container.dart' as di;
 import '../../domain/entities/room.dart';
 import '../bloc/room_bloc.dart';
 import 'create_room_page.dart';
-import 'interactive_room_page.dart';
+import 'prebuilt_audio_room_page.dart';
 
 /// Rooms List Page - Room Discovery
 /// Following blueprint.md: Shows live rooms with filters and search
@@ -217,7 +217,10 @@ class _RoomCard extends StatelessWidget {
         onTap: () {
           Navigator.of(context).push(
             MaterialPageRoute(
-              builder: (context) => InteractiveRoomPage(room: room),
+              builder: (context) => PrebuiltAudioRoomPage(
+                room: room,
+                isHost: false, // Joining as audience
+              ),
             ),
           );
         },
