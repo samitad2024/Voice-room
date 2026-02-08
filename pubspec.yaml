@@ -32,9 +32,13 @@ dependencies:
   supabase_flutter: ^2.5.10
   google_sign_in: ^6.2.2
   
-  # Voice (ZegoCloud)
-  zego_express_engine: ^3.16.0
-  zego_uikit_signaling_plugin: ^2.8.0
+  # Voice (ZegoCloud Prebuilt UIKit - Ready-made UI)
+  zego_uikit_prebuilt_live_audio_room: ^3.13.0
+  
+  # Force compatible versions (overrides transitive dependencies)
+  zego_uikit: ^2.28.43
+  zego_plugin_adapter: ^2.14.2
+  zego_express_engine: ^3.23.0
   
   # In-App Purchases (RevenueCat)
   purchases_flutter: ^8.2.0
@@ -57,12 +61,12 @@ dependencies:
   intl: ^0.20.2
   uuid: ^4.5.1
   url_launcher: ^6.3.1
-  share_plus: ^10.1.2
+  share_plus: ^12.0.0
   timeago: ^3.7.0
   image_picker: ^1.1.2
   
   # Permissions
-  permission_handler: ^11.3.1
+  permission_handler: ^12.0.1
   
   # Deep Linking
   app_links: ^6.3.2
